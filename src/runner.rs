@@ -1,6 +1,6 @@
-mod crypto;
-mod manifest;
-mod protocol;
+use crate::crypto;
+use crate::manifest;
+use crate::protocol;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -61,7 +61,7 @@ enum Commands {
     },
 }
 
-fn main() -> Result<()> {
+pub fn run_cli(_app_name: &str) -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
@@ -450,3 +450,4 @@ fn assemble_file(out_dir: &Path, temp_dir: &Path, manifest: &Manifest) -> Result
     );
     Ok(())
 }
+
