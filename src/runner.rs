@@ -6,9 +6,11 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 
 use crate::crypto;
+use crate::installer;
 use crate::manifest::{self, Manifest};
 use crate::protocol;
 use crate::relay;
+use crate::tui;
 use crate::upnp;
 
 #[derive(Parser)]
@@ -19,7 +21,7 @@ use crate::upnp;
 )]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -79,32 +81,41 @@ enum Commands {
         #[arg(long, default_value = "0.0.0.0:9099")]
         listen: String,
     },
+
+    /// Launch the interactive terminal menu
+    Ui,
+
+    /// Install SmartXfer to the user system PATH
+    Install,
 }
 
-pub fn run_cli(app_name: &str) -> Result<()> {
+pub fn run_cli(_app_name: &str) -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Send {
+        Some(Commands::Send {
             file,
             to,
             relay,
             passphrase,
             chunk_size,
             simulate_flaky,
-        } => run_send(&file, to.as_deref(), relay.as_deref(), &passphrase, chunk_size, simulate_flaky),
-        Commands::Receive {
+        }) => run_send_action(&file, to.as_deref(), relay.as_deref(), &passphrase, chunk_size, simulate_flaky),
+        Some(Commands::Receive {
             listen,
             relay,
             upnp,
             out_dir,
             passphrase,
-        } => run_receive(app_name, listen.as_deref(), relay.as_deref(), upnp, &out_dir, &passphrase),
-        Commands::Relay { listen } => relay::run_relay(&listen),
+        }) => run_receive_action(listen.as_deref(), relay.as_deref(), upnp, &out_dir, &passphrase),
+        Some(Commands::Relay { listen }) => relay::run_relay(&listen),
+        Some(Commands::Ui) => tui::run_interactive_ui(),
+        Some(Commands::Install) => installer::install_binary(),
+        None => tui::run_interactive_ui(),
     }
 }
 
-fn run_send(
+pub fn run_send_action(
     file_path: &Path,
     to: Option<&str>,
     relay_addr: Option<&str>,
@@ -245,8 +256,7 @@ fn run_send(
     Ok(())
 }
 
-fn run_receive(
-    app_name: &str,
+pub fn run_receive_action(
     listen: Option<&str>,
     relay_addr: Option<&str>,
     enable_upnp: bool,
@@ -285,8 +295,8 @@ fn run_receive(
                 if let Some(ext_ip) = &mapping.external_ip {
                     println!("[upnp] Public IP Address: {}", ext_ip);
                     println!(
-                        "[upnp] Remote senders can transfer via: {} send <FILE> --to {}:{} --passphrase \"...\"",
-                        app_name, ext_ip, port
+                        "[upnp] Remote senders can transfer via: smartxfer send <FILE> --to {}:{} --passphrase \"...\"",
+                        ext_ip, port
                     );
                 }
                 Some(mapping)

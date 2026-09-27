@@ -1,3 +1,3 @@
 fn main() -> anyhow::Result<()> {
-    durasend::runner::run_cli("smartxfer")
+    smartxfer::runner::run_cli("smartxfer")
 }

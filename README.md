@@ -1,26 +1,28 @@
-# SmartXfer (DuraSend)
+# SmartXfer
 
 [![Rust Version](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
 [![Security](https://img.shields.io/badge/crypto-XChaCha20--Poly1305-blue.svg)](https://github.com/brycx/orion)
 [![Hashing](https://img.shields.io/badge/integrity-BLAKE3-green.svg)](https://github.com/BLAKE3-team/BLAKE3)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-lightgrey.svg)](LICENSE)
 
-> **Resilient, secure, chunk-resumable file transfer for unstable and remote networks.**  
-> Built specifically for environments where connections drop mid-transfer and starting over is not an option: rural medical clinics, disaster relief zones, racetrack telemetry, mobile field teams, and cross-internet transfers behind NAT/firewalls.
+Standard file transfer tools (`scp`, `rsync`, HTTP upload, cloud buckets) make a fatal assumption that fails in hostile network environments: they assume stable connections, persistent server sessions, or cloud accounts. On rural medical clinic satellite uplinks with hours of downtime, in disaster relief zones with damaged infrastructure, or on high-vibration racetrack telemetry rigs, a dropped connection means either restarting a multi-gigabyte transfer from byte zero, risking silent bitrot corruption, or losing hours of progress because a process restart destroyed in-memory session tokens.
+
+**SmartXfer** solves this by turning **the filesystem itself into the state store**. Instead of fragile session tokens or connection-tied state, transfer identity is derived purely from file identity:
+
+$$\text{file\_id} = \text{BLAKE3}(\text{file\_name} : \text{file\_size} : \text{chunk\_size})$$
+
+Files are split into fixed 1 MiB slices, each independently hashed with **BLAKE3**, compressed with **zstd**, and sealed with **XChaCha20-Poly1305 AEAD** before ever touching the wire. If a connection dies at any byte offset, re-running the identical command simply inspects the receiver's disk and transmits **only the missing chunks**. There is no `--resume` flag to remember, no coordination database, zero plaintext exposure even over untrusted public relays, and complete offline autonomy without internet or cloud accounts.
 
 ---
 
-## Key Features
+## Key Highlights
 
-- 🔄 **Resumable by default** — If a connection drops at any byte offset, re-running the identical command resumes from the exact missing chunk. No `--resume` flag, no session database, no special state to track.
-- 🔐 **Zero-Knowledge End-to-End Encryption** — Chunks are encrypted with **XChaCha20-Poly1305 AEAD** via `orion`. Transports, intermediate routers, and relay servers never see plaintext or encryption keys.
-- ✅ **Independent Per-Chunk Integrity** — Each chunk is hashed with **BLAKE3**. Corrupted chunks are rejected at the chunk level without discarding previously downloaded good chunks.
-- 📦 **Compress-Then-Encrypt** — Payloads are compressed with **zstd** before encryption, saving bandwidth on low-throughput links without compromising ciphertext entropy.
-- 🌐 **3 Flexible Network Topologies**:
-  1. **Direct Offline LAN / Hotspot / Cable** — Pure point-to-point without internet, DNS, or cloud dependencies.
-  2. **Automatic UPnP Port Mapping (`--upnp`)** — Automatically discovers your router, opens port 9099, and retrieves your public IP for direct internet transfers.
-  3. **Encrypted Relay Mode (`--relay`)** — Traverses cellular 4G/5G, double-NAT, and corporate firewalls via an outbound-bridged relay server while keeping files 100% end-to-end encrypted.
-- 📀 **Single Static Binary** — Zero runtime dependencies, no Python/Node/Java requirements on target machines.
+- 🔄 **Resumable by default** — Kill the connection at 99%, rerun the same command, it picks up exactly at the missing chunk. No special flags.
+- 🔐 **Zero-Knowledge AEAD Encryption** — End-to-end XChaCha20-Poly1305 encryption per chunk. Transports and relays see only opaque ciphertext.
+- ✅ **Independent Chunk Integrity** — BLAKE3 hashing catches corruption per 1 MiB chunk; one bad chunk never invalidates good chunks already saved.
+- 📦 **Compress-Then-Encrypt** — zstd level 3 compression precedes encryption, saving bandwidth on costly satellite and cellular links.
+- 🌐 **3 Network Topologies** — Works offline over direct LAN/hotspot cable, over the internet via automatic UPnP router port mapping, or through a zero-knowledge relay across NAT/firewalls.
+- 🖥️ **Interactive Terminal UI & Auto-Installer** — Run `smartxfer` or `smartxfer ui` for a guided interactive menu, and `smartxfer install` to add it to your system PATH permanently.
 
 ---
 
@@ -32,6 +34,7 @@
   - [Mode 1: Offline / Direct LAN Transfer](#mode-1-offline--direct-lan-transfer)
   - [Mode 2: Automatic UPnP Router Port Forwarding](#mode-2-automatic-upnp-router-port-forwarding)
   - [Mode 3: Zero-Knowledge Encrypted Relay](#mode-3-zero-knowledge-encrypted-relay)
+- [Interactive Terminal UI & Installation](#interactive-terminal-ui--installation)
 - [Step-by-Step Instruction Guide](#step-by-step-instruction-guide)
   - [Guide 1: Quick Loopback Test on a Single Laptop](#guide-1-quick-loopback-test-on-a-single-laptop)
   - [Guide 2: Testing the Network Crash & Instant Resume](#guide-2-testing-the-network-crash--instant-resume)
@@ -39,17 +42,9 @@
   - [Guide 4: Transferring Over the Internet with UPnP](#guide-4-transferring-over-the-internet-with-upnp)
   - [Guide 5: Transferring Over Remote Networks with the Relay](#guide-5-transferring-over-remote-networks-with-the-relay)
 - [Wire Protocol Specification](#wire-protocol-specification)
-  - [Framing Protocol](#framing-protocol)
-  - [Manifest Schema](#manifest-schema)
-  - [Binary Chunk Frame Layout](#binary-chunk-frame-layout)
-- [Resilience & Resume Mechanics](#resilience--resume-mechanics)
 - [CLI Reference](#cli-reference)
-  - [`send`](#send)
-  - [`receive`](#receive)
-  - [`relay`](#relay)
 - [Security & Threat Model](#security--threat-model)
 - [Build & Installation](#build--installation)
-  - [Dependency Pinning Notes](#dependency-pinning-notes)
 - [Project Structure](#project-structure)
 - [Roadmap](#roadmap)
 
@@ -57,9 +52,7 @@
 
 ## How It Works
 
-Files are divided into fixed-size chunks (default **1 MiB**). Each chunk undergoes independent hashing, compression, and AEAD encryption. 
-
-The receiver tracks verified chunks in a content-addressed directory on disk (`.durasend_<file_id>/`). When a transfer starts or restarts, the receiver compares what is already verified on disk against the sender's manifest and requests **only the missing chunk indices**.
+A file is split into fixed-size chunks (1 MiB by default). Each chunk is independently hashed, compressed, and encrypted. The receiver tracks verified chunks on disk for that `file_id`. If interrupted, re-running only transmits the gaps.
 
 ```mermaid
 flowchart LR
@@ -79,8 +72,6 @@ flowchart LR
 ---
 
 ## System Architecture
-
-The following diagram illustrates how the Sender, Wire Protocol, and Receiver interact during a transfer:
 
 ```mermaid
 flowchart TB
@@ -119,42 +110,22 @@ flowchart TB
     W3 --> R1
 ```
 
-### Module Responsibilities
-
-| Module | Source File | Responsibility |
-|---|---|---|
-| `manifest` | [`src/manifest.rs`](src/manifest.rs) | File identification, chunk slicing, BLAKE3 per-chunk hashing, and `file_id` derivation |
-| `crypto` | [`src/crypto.rs`](src/crypto.rs) | Symmetric key derivation and Orion XChaCha20-Poly1305 AEAD seal/open routines |
-| `protocol` | [`src/protocol.rs`](src/protocol.rs) | Length-prefixed wire framing (`[u32 LE length][payload]`) and binary chunk framing |
-| `relay` | [`src/relay.rs`](src/relay.rs) | High-performance TCP bridging relay server, session derivation, and client pairing |
-| `upnp` | [`src/upnp.rs`](src/upnp.rs) | SSDP UDP multicast gateway discovery, UPnP IGD port mapping, and public IP lookup |
-| `runner` | [`src/runner.rs`](src/runner.rs) | CLI command parsing, transfer state machines, atomic writes, and file assembly |
-| `binaries` | [`src/bin/`](src/bin/) | Dual CLI entry points: `smartxfer` and `durasend` |
-
 ---
 
 ## Network Topologies & Remote Transfers
 
-SmartXfer is engineered to adapt to different network conditions:
-
 ### Mode 1: Offline / Direct LAN Transfer
-For local facilities, field networks, and disaster relief zones without internet access.
-- Both devices connect over the same local Wi-Fi, Ethernet patch cable, or smartphone Wi-Fi hotspot.
-- Pure peer-to-peer TCP connection directly between the two local IPs.
+Connect two devices directly over local Wi-Fi, Ethernet patch cable, or phone hotspot without internet, DNS, or servers.
 
 ```mermaid
 flowchart LR
-    Sender["Laptop A (Sender)<br/>192.168.1.10"] <== Direct TCP on Port 9099 ==> Receiver["Laptop B (Receiver)<br/>192.168.1.20"]
+    Sender["Laptop A (Sender)<br/>192.168.1.10"] <-->|Direct TCP on Port 9099| Receiver["Laptop B (Receiver)<br/>192.168.1.20"]
 ```
 
 ---
 
 ### Mode 2: Automatic UPnP Router Port Forwarding
-For direct P2P transfers over the public Internet between homes or offices.
-- Receiver passes `--upnp`.
-- SmartXfer sends an SSDP discovery packet to the local router, maps TCP port `9099`, and queries the router for its public IP address (e.g. `203.0.113.15`).
-- The remote sender connects directly to `203.0.113.15:9099`.
-- When the receiver completes or terminates, it automatically unmaps the port from the router.
+If you are behind a home or office router, `--upnp` tells SmartXfer to open the port on your router and find your public IP automatically.
 
 ```mermaid
 sequenceDiagram
@@ -177,12 +148,7 @@ sequenceDiagram
 ---
 
 ### Mode 3: Zero-Knowledge Encrypted Relay
-For scenarios where both devices are behind strict firewalls, double-NAT, carrier-grade NAT (cellular 4G/5G mobile data), or university/hospital networks.
-- A public host runs `smartxfer relay --listen 0.0.0.0:9099`.
-- Both Receiver and Sender establish **outbound** TCP connections to the relay.
-- Each client sends a 17-byte session registration: `[role][16-byte session_token]`, where `session_token = blake3("smartxfer_relay_session_v1:" + passphrase)`.
-- The relay pairs the two sockets and bridges them bi-directionally.
-- **Relay Zero-Knowledge Security:** All data transmitted through the relay is encrypted with Orion XChaCha20-Poly1305 AEAD. The relay server never sees keys, cannot inspect data, and cannot tamper with chunks.
+For devices behind cellular 4G/5G, double-NAT, or corporate firewalls where ports cannot be opened. Both devices connect **outbound** to a relay server.
 
 ```mermaid
 flowchart LR
@@ -198,11 +164,43 @@ flowchart LR
         R["Receiver Laptop"]
     end
 
-    S -- "Outbound TCP: Connect & Pair" --> Relay
-    R -- "Outbound TCP: Register & Wait" --> Relay
-    Relay -. "Bridges Opaque Ciphertext .-" S
-    Relay -. "Bridges Opaque Ciphertext .-" R
+    S -->|Outbound TCP: Connect & Pair| Relay
+    R -->|Outbound TCP: Register & Wait| Relay
+    Relay -.->|Bridges Opaque Ciphertext| S
+    Relay -.->|Bridges Opaque Ciphertext| R
 ```
+
+---
+
+## Interactive Terminal UI & Installation
+
+### Built-in Interactive Menu
+Run `smartxfer` with no arguments, or run `smartxfer ui` to launch the guided terminal interface:
+
+```text
+================================================================
+              SmartXfer — Resilient File Transfer               
+       Autonomous, Encrypted, Resumable Transfer Suite          
+================================================================
+
+  [1] 📥 Receive a file (Direct LAN or UPnP)
+  [2] 📤 Send a file (Direct connection)
+  [3] 🌐 Receive via Remote Relay (Across firewalls / NAT)
+  [4] 🚀 Send via Remote Relay (Across firewalls / NAT)
+  [5] 🛠️  Start a Relay Server
+  [6] 📦 Install SmartXfer to System PATH
+  [7] 🧪 Run Cryptographic Self-Test & Diagnostic
+  [8] ❌ Exit
+
+Select an option [1-8]:
+```
+
+### Self-Installation to PATH
+To install `smartxfer` into your user environment so you can run it from any directory:
+```bash
+smartxfer install
+```
+This automatically copies the binary to `~/.smartxfer/bin/smartxfer.exe` and adds that directory to your Windows/Linux user `PATH` environment variable.
 
 ---
 
@@ -216,55 +214,33 @@ flowchart LR
    ```
 2. Open **Terminal 2** and send a test file:
    ```powershell
-   # Create a test file
    "Hello from SmartXfer!" | Out-File -FilePath hello.txt
-
-   # Send to the receiver
    smartxfer send hello.txt --to 127.0.0.1:9099 --passphrase "mysecret123"
    ```
-3. Check `downloads/hello.txt` to verify the file was received and reassembled.
 
 ---
 
 ### Guide 2: Testing the Network Crash & Instant Resume
 
-SmartXfer comes with a `--simulate-flaky` flag that deliberately drops the connection mid-transfer so you can verify the resume mechanics:
-
 1. Generate a 5 MB test file in **Terminal 2**:
    ```powershell
    python -c "with open('patient_records.bin', 'wb') as f: f.write(b'X' * 5 * 1024 * 1024)"
    ```
-2. Run `send` with `--simulate-flaky`:
+2. Send with `--simulate-flaky` to simulate a dropped connection:
    ```powershell
    smartxfer send patient_records.bin --to 127.0.0.1:9099 --passphrase "mysecret123" --simulate-flaky
    ```
-   **Output:**
-   ```text
-   [smartxfer] Sent chunk 1/5 (index: 0...)
-   [smartxfer] [FLAKY SIMULATION] Intentionally killing connection after sending 1 chunk(s).
-   ```
-3. Re-run the exact same command (without the simulation flag):
+3. Re-run the identical command (picks up right where it left off):
    ```powershell
    smartxfer send patient_records.bin --to 127.0.0.1:9099 --passphrase "mysecret123"
    ```
-   **Output:**
-   ```text
-   [smartxfer] Receiver requested 4 missing chunk(s) out of 5 total.
-   [smartxfer] Sent chunk 1/4 (index: 1...)
-   [smartxfer] Sent chunk 2/4 (index: 2...)
-   [smartxfer] Sent chunk 3/4 (index: 3...)
-   [smartxfer] Sent chunk 4/4 (index: 4...)
-   [smartxfer] All requested chunks sent successfully!
-   ```
-   Notice that **Chunk 0 was never re-sent**! The receiver kept chunk 0 on disk and only requested the missing chunks.
+   *Only missing chunks are transmitted. Chunks already verified on disk are preserved.*
 
 ---
 
 ### Guide 3: Transferring Between Two Laptops on the Same Wi-Fi
 
-1. **Find the Receiver's IP Address** (on Laptop A):
-   - Windows: Run `ipconfig` (find your `IPv4 Address`, e.g., `192.168.1.45`)
-   - macOS / Linux: Run `ifconfig` or `ip a`
+1. **Find Receiver IP** on Laptop A: Run `ipconfig` (Windows) or `ifconfig` (macOS/Linux).
 2. **On Laptop A (Receiver):**
    ```bash
    smartxfer receive --listen 0.0.0.0:9099 --out-dir ./received --passphrase "fieldpass"
@@ -278,16 +254,16 @@ SmartXfer comes with a `--simulate-flaky` flag that deliberately drops the conne
 
 ### Guide 4: Transferring Over the Internet with UPnP
 
-1. **On Receiver (Home/Office Laptop behind router):**
+1. **On Receiver (Behind home router):**
    ```bash
    smartxfer receive --listen 0.0.0.0:9099 --upnp --out-dir ./received --passphrase "remotepass"
    ```
-   SmartXfer prints:
+   SmartXfer outputs:
    ```text
    [upnp] Router port 9099 successfully opened via UPnP!
    [upnp] Public IP Address: 203.0.113.88
    ```
-2. **On Remote Sender (Anywhere in the world):**
+2. **On Remote Sender:**
    ```bash
    smartxfer send ./dataset.zip --to 203.0.113.88:9099 --passphrase "remotepass"
    ```
@@ -296,15 +272,15 @@ SmartXfer comes with a `--simulate-flaky` flag that deliberately drops the conne
 
 ### Guide 5: Transferring Over Remote Networks with the Relay
 
-1. **Start the Relay on any public VPS or server:**
+1. **Start the Relay on any public server:**
    ```bash
    smartxfer relay --listen 0.0.0.0:9099
    ```
-2. **On the Receiver (behind firewall or mobile hotspot):**
+2. **On Receiver:**
    ```bash
    smartxfer receive --relay relay.example.com:9099 --out-dir ./received --passphrase "remotepass"
    ```
-3. **On the Sender (behind another network or mobile hotspot):**
+3. **On Sender:**
    ```bash
    smartxfer send ./dataset.zip --relay relay.example.com:9099 --passphrase "remotepass"
    ```
@@ -313,15 +289,7 @@ SmartXfer comes with a `--simulate-flaky` flag that deliberately drops the conne
 
 ## Wire Protocol Specification
 
-All communication occurs over a single TCP connection per attempt. Every message uses length-prefixed framing.
-
-### Framing Protocol
-Every message frame starts with a 4-byte little-endian length prefix followed by the payload bytes:
-```text
-+-----------------------+-----------------------------+
-| Payload Length: 4B LE | Payload Bytes (Length bytes)|
-+-----------------------+-----------------------------+
-```
+Every message uses length-prefixed framing: `[u32 LE length][payload]`.
 
 ```mermaid
 sequenceDiagram
@@ -337,60 +305,19 @@ sequenceDiagram
         Note over S: Display "Nothing to send" and exit cleanly
     else If Chunks Missing
         loop For each missing chunk
-            S->>R: Frame 3: Binary Chunk Frame
+            S->>R: Frame 3: Binary Chunk Frame [index + ciphertext]
             Note over R: Decrypt (AEAD) -> Decompress (zstd)<br/>-> Verify BLAKE3 -> Write to chunk_N
         end
         Note over R: All chunks present -> Assemble final file
     end
 ```
 
-### Manifest Schema
-Transmitted as a JSON frame:
-```json
-{
-  "file_name": "clinic_batch_2026.tar.zst",
-  "file_size": 6291456,
-  "chunk_size": 1048576,
-  "chunk_hashes": [
-    "3f7a1c5d...",
-    "a8e4b2f1...",
-    "7c0e9d4a..."
-  ],
-  "file_id": "04436cfa2ec925585fdc3724a534c860605c62b9f964db5f7896645374afa153"
-}
-```
-
 ### Binary Chunk Frame Layout
-Chunk payloads use a compact binary format to avoid Base64 encoding overhead:
 ```text
 +---------------------+------------------------------------------------+
 | Chunk Index (4B LE) | Orion AEAD Ciphertext (Nonce + Tag + Payload)  |
 +---------------------+------------------------------------------------+
 ```
-*(Orion embeds its own internal nonce and authentication tag inside the ciphertext; no separate nonce field is required.)*
-
----
-
-## Resilience & Resume Mechanics
-
-### Content-Addressed Transfer State
-Transfer identity is derived from the file itself:
-$$\text{file\_id} = \text{BLAKE3}(\text{file\_name} : \text{file\_size} : \text{chunk\_size})$$
-
-On the receiver side, incoming chunks are stored in:
-```text
-<out_dir>/.durasend_<file_id>/
-├── manifest.json
-├── chunk_0
-├── chunk_1
-└── chunk_4
-```
-
-### Atomic Chunk Verification & Writing
-1. A chunk file is only named `chunk_N` after its decrypted plaintext has been verified against `manifest.chunk_hashes[N]`.
-2. Plaintext is written to `chunk_N.tmp` and flushed to disk before being atomically renamed to `chunk_N`.
-3. An interrupted write never leaves a corrupted chunk file on disk.
-4. When all chunks `0` through `N-1` are present, the receiver concatenates the chunks in index order into `<out_dir>/<file_name>` and deletes the temporary directory.
 
 ---
 
@@ -434,6 +361,16 @@ Options:
   -h, --help             Print help
 ```
 
+### `ui`
+```text
+Usage: smartxfer ui
+```
+
+### `install`
+```text
+Usage: smartxfer install
+```
+
 ---
 
 ## Security & Threat Model
@@ -448,8 +385,6 @@ Options:
 | **Key Derivation** | Raw BLAKE3 hash of passphrase | ⚠️ MVP Only (Argon2id on Roadmap) |
 | **Forward Secrecy** | Static passphrase-derived key per transfer | ⚠️ Planned on Roadmap |
 
-**Threat Model Summary:** SmartXfer protects file contents from passive network observers, malicious Wi-Fi access points, and compromised relay servers. The relay never possesses the secret key and cannot decrypt or modify the data.
-
 ---
 
 ## Build & Installation
@@ -458,32 +393,19 @@ Options:
 - Rust 1.75+ (or any modern stable toolchain).
 
 ```bash
-git clone https://github.com/Sonalhegde/durasend.git
-cd durasend
+git clone https://github.com/Sonalhegde/smartxfer.git
+cd smartxfer
 cargo build --release
 ```
 
-Compiled binaries are generated at:
-- `target/release/smartxfer` (and `target/release/durasend`)
-
-### Dependency Pinning Notes
-Several crates in the cryptography ecosystem require the `edition2024` feature stabilized in Rust 1.85. To guarantee broad compatibility with older enterprise and Debian/Ubuntu toolchains (e.g., Rust 1.75), `Cargo.toml` pins:
-- `zeroize = "=1.7.0"`
-- `getrandom = "=0.2.15"`
-- `clap = "=4.4.18"`
-- `jobserver = "=0.1.32"`
-
-If building on an older compiler, ensure `jobserver` remains pinned:
-```bash
-cargo update -p jobserver --precise 0.1.32
-```
+Binaries are located at `target/release/smartxfer` (and `target/release/durasend`).
 
 ---
 
 ## Project Structure
 
 ```text
-durasend/
+smartxfer/
 ├── Cargo.toml
 ├── Cargo.lock
 ├── README.md               <- Comprehensive documentation & guide
@@ -497,9 +419,11 @@ durasend/
     ├── protocol.rs         Length-prefixed framing and binary chunk payload framing
     ├── relay.rs            High-performance TCP bridging relay & session pairing
     ├── upnp.rs             UPnP IGD gateway discovery, port mapping & IP resolution
+    ├── installer.rs        Self-installer adding binary to user PATH
+    ├── tui.rs              Interactive Terminal UI menu
     └── bin/
         ├── smartxfer.rs    smartxfer executable
-        └── durasend.rs     durasend executable
+        └── durasend.rs     durasend executable alias
 ```
 
 ---
