@@ -90,6 +90,7 @@ enum Commands {
 }
 
 pub fn run_cli(_app_name: &str) -> Result<()> {
+    crate::theme::enable_ansi_support();
     let cli = Cli::parse();
 
     match cli.command {

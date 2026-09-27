@@ -4,5 +4,6 @@ pub mod manifest;
 pub mod protocol;
 pub mod relay;
 pub mod runner;
+pub mod theme;
 pub mod tui;
 pub mod upnp;

@@ -22,7 +22,7 @@ Files are split into fixed 1 MiB slices, each independently hashed with **BLAKE3
 - [*] **Independent Chunk Integrity** — BLAKE3 hashing catches corruption per 1 MiB chunk; one bad chunk never invalidates good chunks already saved.
 - [*] **Compress-Then-Encrypt** — zstd level 3 compression precedes encryption, saving bandwidth on costly satellite and cellular links.
 - [*] **3 Network Topologies** — Works offline over direct LAN/hotspot cable, over the internet via automatic UPnP router port mapping, or through a zero-knowledge relay across NAT/firewalls.
-- [*] **Interactive ASCII Terminal UI & Auto-Installer** — Run `smartxfer` or `smartxfer ui` for a guided ASCII terminal menu, and `smartxfer install` to add it to your system PATH permanently.
+- [*] **Interactive ASCII Terminal UI with Dynamic RGB Themes** — Run `smartxfer` or `smartxfer ui` for a guided ASCII terminal menu with dynamic TrueColor RGB gradients that cycle on every launch and menu loop (Cyberpunk Neon, Synthwave Sunset, Matrix Emerald, Solar Flare, etc.), plus `smartxfer install` to add it to system PATH permanently.
 
 ---
 
@@ -174,26 +174,36 @@ flowchart LR
 
 ## Interactive Terminal UI & Installation
 
-### ASCII-Themed Interactive Menu
-Run `smartxfer` with no arguments, or run `smartxfer ui` to launch the guided ASCII terminal interface:
+### ASCII-Themed Interactive Menu with Dynamic RGB Palettes
+Run `smartxfer` with no arguments, or run `smartxfer ui` to launch the guided ASCII terminal interface. It features **dynamic 24-bit TrueColor RGB gradients** that automatically shift to a fresh palette every time you open the program or loop back to the menu:
 
 ```text
-+--------------------------------------------------------------+
-|             SMARTXFER - Resilient File Transfer              |
-|       Autonomous, Encrypted, Resumable Transfer Suite        |
-+--------------------------------------------------------------+
++============================================================+
+|   ____  __  __    _    ____ _____ __  ______ _____ ____    |
+|  / ___||  \/  |  / \  |  _ \_   _|\ \/ /  ___| ____|  _ \   |
+|  \___ \| |\/| | / _ \ | |_) || |   \  /| |_  |  _| | |_) |  |
+|   ___) | |  | |/ ___ \|  _ < | |   /  \|  _|| |___|  _ <   |
+|  |____/|_|  |_/_/   \_\_| \_\|_|  /_/\_\_|   |_____|_| \_\  |
+|------------------------------------------------------------|
+|     Resilient - Encrypted - Autonomous File Transfer Suite     |
+|               [ RGB Palette: Cyberpunk Neon ]                |
++============================================================+
 
   [1] Receive a file (Direct LAN or UPnP)
   [2] Send a file (Direct connection)
   [3] Receive via Remote Relay (Across firewalls / NAT)
   [4] Send via Remote Relay (Across firewalls / NAT)
-  [5] Start a Relay Server
-  [6] Install SmartXfer to System PATH
-  [7] Run Cryptographic Self-Test & Diagnostic
+  [5] Start a Relay Server (Zero-knowledge bridge)
+  [6] Install SmartXfer to PATH (Make globally executable)
+  [7] Run Self-Test & Diagnostic (Verify AEAD & BLAKE3)
+  [0] Cycle RGB Theme Palette (Shift to next colors)
   [8] Exit
 
-Select an option [1-8]:
+>> Select an option [0-8]:
 ```
+
+> [!NOTE]
+> Included RGB Palettes: **Cyberpunk Neon**, **Synthwave Sunset**, **Matrix Emerald**, **Deep Oceanic**, **Solar Flare**, **Aurora Borealis**, **Tokyo Night**, **Laser Cyber**, **Galactic Nebula**, and **Electrum Gold**. Every launch chooses a randomized seed palette, and option `[0]` shifts immediately to the next theme.
 
 ### Self-Installation to PATH
 To install `smartxfer` into your user environment so you can run it from any directory:
