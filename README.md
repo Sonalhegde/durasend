@@ -17,12 +17,12 @@ Files are split into fixed 1 MiB slices, each independently hashed with **BLAKE3
 
 ## Key Highlights
 
-- 🔄 **Resumable by default** — Kill the connection at 99%, rerun the same command, it picks up exactly at the missing chunk. No special flags.
-- 🔐 **Zero-Knowledge AEAD Encryption** — End-to-end XChaCha20-Poly1305 encryption per chunk. Transports and relays see only opaque ciphertext.
-- ✅ **Independent Chunk Integrity** — BLAKE3 hashing catches corruption per 1 MiB chunk; one bad chunk never invalidates good chunks already saved.
-- 📦 **Compress-Then-Encrypt** — zstd level 3 compression precedes encryption, saving bandwidth on costly satellite and cellular links.
-- 🌐 **3 Network Topologies** — Works offline over direct LAN/hotspot cable, over the internet via automatic UPnP router port mapping, or through a zero-knowledge relay across NAT/firewalls.
-- 🖥️ **Interactive Terminal UI & Auto-Installer** — Run `smartxfer` or `smartxfer ui` for a guided interactive menu, and `smartxfer install` to add it to your system PATH permanently.
+- [*] **Resumable by default** — Kill the connection at 99%, rerun the same command, it picks up exactly at the missing chunk. No special flags required.
+- [*] **Zero-Knowledge AEAD Encryption** — End-to-end XChaCha20-Poly1305 encryption per chunk. Transports and relays see only opaque ciphertext.
+- [*] **Independent Chunk Integrity** — BLAKE3 hashing catches corruption per 1 MiB chunk; one bad chunk never invalidates good chunks already saved.
+- [*] **Compress-Then-Encrypt** — zstd level 3 compression precedes encryption, saving bandwidth on costly satellite and cellular links.
+- [*] **3 Network Topologies** — Works offline over direct LAN/hotspot cable, over the internet via automatic UPnP router port mapping, or through a zero-knowledge relay across NAT/firewalls.
+- [*] **Interactive ASCII Terminal UI & Auto-Installer** — Run `smartxfer` or `smartxfer ui` for a guided ASCII terminal menu, and `smartxfer install` to add it to your system PATH permanently.
 
 ---
 
@@ -174,23 +174,23 @@ flowchart LR
 
 ## Interactive Terminal UI & Installation
 
-### Built-in Interactive Menu
-Run `smartxfer` with no arguments, or run `smartxfer ui` to launch the guided terminal interface:
+### ASCII-Themed Interactive Menu
+Run `smartxfer` with no arguments, or run `smartxfer ui` to launch the guided ASCII terminal interface:
 
 ```text
-================================================================
-              SmartXfer — Resilient File Transfer               
-       Autonomous, Encrypted, Resumable Transfer Suite          
-================================================================
++--------------------------------------------------------------+
+|             SMARTXFER - Resilient File Transfer              |
+|       Autonomous, Encrypted, Resumable Transfer Suite        |
++--------------------------------------------------------------+
 
-  [1] 📥 Receive a file (Direct LAN or UPnP)
-  [2] 📤 Send a file (Direct connection)
-  [3] 🌐 Receive via Remote Relay (Across firewalls / NAT)
-  [4] 🚀 Send via Remote Relay (Across firewalls / NAT)
-  [5] 🛠️  Start a Relay Server
-  [6] 📦 Install SmartXfer to System PATH
-  [7] 🧪 Run Cryptographic Self-Test & Diagnostic
-  [8] ❌ Exit
+  [1] Receive a file (Direct LAN or UPnP)
+  [2] Send a file (Direct connection)
+  [3] Receive via Remote Relay (Across firewalls / NAT)
+  [4] Send via Remote Relay (Across firewalls / NAT)
+  [5] Start a Relay Server
+  [6] Install SmartXfer to System PATH
+  [7] Run Cryptographic Self-Test & Diagnostic
+  [8] Exit
 
 Select an option [1-8]:
 ```
@@ -377,13 +377,13 @@ Usage: smartxfer install
 
 | Security Property | Mechanism | Status |
 |---|---|---|
-| **Confidentiality in Transit** | XChaCha20-Poly1305 AEAD per chunk (`orion`) | ✅ Enforced |
-| **Per-Chunk Integrity** | BLAKE3 hash verified before write | ✅ Enforced |
-| **Whole-File Integrity** | Implied by all chunk hashes matching the manifest | ✅ Enforced |
-| **Authentication Tag** | Orion includes and verifies 16-byte Poly1305 auth tag | ✅ Enforced |
-| **Relay Zero-Knowledge** | Relay only forwards ciphertext without seeing keys | ✅ Enforced |
-| **Key Derivation** | Raw BLAKE3 hash of passphrase | ⚠️ MVP Only (Argon2id on Roadmap) |
-| **Forward Secrecy** | Static passphrase-derived key per transfer | ⚠️ Planned on Roadmap |
+| **Confidentiality in Transit** | XChaCha20-Poly1305 AEAD per chunk (`orion`) | [ENFORCED] |
+| **Per-Chunk Integrity** | BLAKE3 hash verified before write | [ENFORCED] |
+| **Whole-File Integrity** | Implied by all chunk hashes matching the manifest | [ENFORCED] |
+| **Authentication Tag** | Orion includes and verifies 16-byte Poly1305 auth tag | [ENFORCED] |
+| **Relay Zero-Knowledge** | Relay only forwards ciphertext without seeing keys | [ENFORCED] |
+| **Key Derivation** | Raw BLAKE3 hash of passphrase | [MVP ONLY - Argon2id on Roadmap] |
+| **Forward Secrecy** | Static passphrase-derived key per transfer | [ROADMAP] |
 
 ---
 
@@ -420,7 +420,7 @@ smartxfer/
     ├── relay.rs            High-performance TCP bridging relay & session pairing
     ├── upnp.rs             UPnP IGD gateway discovery, port mapping & IP resolution
     ├── installer.rs        Self-installer adding binary to user PATH
-    ├── tui.rs              Interactive Terminal UI menu
+    ├── tui.rs              ASCII-themed interactive Terminal UI menu
     └── bin/
         ├── smartxfer.rs    smartxfer executable
         └── durasend.rs     durasend executable alias

@@ -24,7 +24,7 @@ pub fn install_binary() -> Result<()> {
     // Also copy as durasend.exe alias
     let _ = fs::copy(&current_exe, &target_durasend);
 
-    println!("[installer] Binary installed successfully!");
+    println!("[installer] Binary installed successfully.");
 
     // Add to Windows User PATH
     if cfg!(target_os = "windows") {
@@ -35,8 +35,8 @@ pub fn install_binary() -> Result<()> {
     }
 
     println!();
-    println!("🎉 Installation Complete!");
-    println!("You can now open any new terminal window and simply type:");
+    println!("[SUCCESS] Installation Complete.");
+    println!("You can now open any new terminal window and type:");
     println!("   smartxfer --help");
     println!("   smartxfer ui");
     println!();
