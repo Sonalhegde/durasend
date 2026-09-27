@@ -5,12 +5,21 @@ import sys
 import shutil
 
 exe = os.path.abspath("target/release/durasend.exe")
-source_file = os.path.abspath("test_env/source_data.bin")
-out_dir = os.path.abspath("test_env/receiver_out")
+test_dir = os.path.abspath("test_env")
+source_file = os.path.join(test_dir, "source_data.bin")
+out_dir = os.path.join(test_dir, "receiver_out")
 addr = "127.0.0.1:9555"
 passphrase = "telemetry_secret_key_2026"
 
-# Ensure clean slate for receiver output
+os.makedirs(test_dir, exist_ok=True)
+
+# Generate or ensure source test file (6 MB)
+if not os.path.exists(source_file) or os.path.getsize(source_file) != 6 * 1024 * 1024:
+    print("Generating 6 MB pseudo-random test file...")
+    with open(source_file, "wb") as f:
+        f.write(os.urandom(6 * 1024 * 1024))
+
+# Reset receiver output directory
 if os.path.exists(out_dir):
     shutil.rmtree(out_dir)
 os.makedirs(out_dir, exist_ok=True)
@@ -40,6 +49,7 @@ try:
     print(p1.stdout)
     if "[FLAKY SIMULATION]" not in p1.stdout:
         print("FAILED: Simulation did not trigger flaky drop")
+        print("STDERR:", p1.stderr)
         sys.exit(1)
 
     time.sleep(1.0)
