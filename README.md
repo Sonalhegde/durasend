@@ -47,6 +47,8 @@ Files are split into fixed 1 MiB slices, each independently hashed with **BLAKE3
 - [Build & Installation](#build--installation)
 - [Project Structure](#project-structure)
 - [Roadmap](#roadmap)
+- [Known Limitations](#known-limitations)
+- [Frequently Asked Questions (FAQ)](#frequently-asked-questions-faq)
 
 ---
 
@@ -446,3 +448,122 @@ smartxfer/
 4. **Autonomous P2P Hole Punching (`libp2p`)** — Automatic STUN/TURN/DERP direct P2P NAT traversal without manual relay configuration.
 5. **Store-and-Forward SQLite Queue** — Offline spooling that flushes transfers automatically upon detecting connectivity.
 6. **Desktop & Mobile GUI** — Lightweight cross-platform interface powered by Tauri and UniFFI mobile bindings.
+---
+
+## Known Limitations
+
+While SmartXfer is architected for extreme resilience on unstable links, the following architectural boundaries and current MVP constraints apply:
+
+1. **Transport Layer Head-of-Line Blocking (TCP)**:
+   - SmartXfer currently communicates over standard TCP sockets. On connections suffering severe packet loss (>15-20%), TCP's congestion control will throttle window sizes and retransmit packets at the transport layer, causing latency spikes.
+   - *Roadmap Mitigation*: Replacing the TCP socket core with QUIC (`quinn` over UDP) in v0.2.0 to provide multiplexed, loss-tolerant streams without head-of-line blocking.
+
+2. **NAT Traversal Requirements**:
+   - For peers across different remote networks behind restrictive firewalls or Carrier-Grade NAT (CGNAT, typical in mobile/cellular 4G/5G connections), direct peer-to-peer connection is impossible without either:
+     - Router UPnP port forwarding enabled on the receiver's gateway (`--upnp`), or
+     - A lightweight relay server reachable by both peers (`--relay <ADDR>`).
+   - *Roadmap Mitigation*: Integrating autonomous STUN/TURN/DERP hole punching (`libp2p`) for direct peer-to-peer NAT traversal without manual relay configuration.
+
+3. **Single File Transfer (No Native Directory Tree)**:
+   - SmartXfer operates on individual files. To send nested folder hierarchies, compress the directory into an archive (e.g. `.zip`, `.tar.gz`) before initiating transfer.
+   - *Roadmap Mitigation*: Native directory recursion, tar stream pipeline, and multi-file batch manifests are planned.
+
+4. **Temporary Disk Overhead During In-Flight Transfers**:
+   - The receiver saves verified chunks as individual `.chunk` files inside the target directory until all chunks are validated and assembled into the final output file.
+   - This requires approximately **1.0x to 1.5x additional disk space** during the transfer process until the chunks are combined and cleaned up.
+
+5. **Key Derivation Work Factor (Passphrase Brute-Force)**:
+   - The current cryptographic implementation derives the 256-bit AEAD key using raw BLAKE3 hashing of the passphrase string. For short or weak passphrases (e.g., "secret123"), an attacker with physical access to captured ciphertext could attempt offline dictionary attacks.
+   - *Recommendation*: Use high-entropy passphrases or passphrases with 16+ characters.
+   - *Roadmap Mitigation*: Argon2id key derivation function with random salt embedded in the manifest.
+
+6. **Sequential Chunk Transmission**:
+   - Chunks are currently transmitted sequentially over a single stream. On high-bandwidth, high-latency links (e.g. 1 Gbps with 200ms RTT), a single stream may not saturate the bandwidth pipe as quickly as parallel multi-stream transfers.
+
+---
+
+## Frequently Asked Questions (FAQ)
+
+### Q: How much physical and network distance does SmartXfer work across?
+SmartXfer operates across **any distance** — from centimeters to planetary scale:
+- **Local Mode (Direct LAN / Offline)**:
+  - **Direct Ethernet Cable**: Up to 100 meters (328 ft) per standard Cat5e/Cat6 cable run without repeaters.
+  - **Local Wi-Fi / Hotspot**: Up to 30-100 meters depending on obstacles, walls, and Wi-Fi signal strength.
+  - *No Internet connection or external gateway is needed in this mode.*
+- **Remote Mode (UPnP Gateway or Encrypted Relay)**:
+  - **Worldwide / Unlimited Physical Distance**: Works across continents, oceans, and orbital paths. Whether the sender is in New York and the receiver is in Tokyo, on a ship in the Pacific Ocean via Iridium/Starlink satellite, or in an ambulance over rural 4G/5G, SmartXfer connects as long as both peers have IP reachability or access to a common relay.
+  - **High-Latency Tolerant**: SmartXfer does not drop session state when ping exceeds 1000ms+; each chunk is independently verified so transmission delay never corrupts state.
+
+---
+
+### Q: How does SmartXfer resume interrupted transfers without a `--resume` flag?
+SmartXfer uses **content-addressed file identification**:
+1. When a transfer begins, both sides compute the unique `file_id`:
+   $$\text{file\_id} = \text{BLAKE3}(\text{file\_name} : \text{file\_size} : \text{chunk\_size})$$
+2. The receiver checks its disk directory for any chunks matching `<file_id>_<index>.chunk`.
+3. It verifies the cryptographic BLAKE3 hash of each existing chunk against the manifest.
+4. It sends back a single bitmap array containing only the chunk indices that are **missing or corrupt**.
+5. The sender only transmits those specific missing chunks. If a transfer crashes 10 times, each restart only transfers the remaining fraction.
+
+---
+
+### Q: Can an untrusted relay server read or modify my files?
+**No.** SmartXfer uses end-to-end **zero-knowledge encryption**:
+- Every chunk is compressed with `zstd` and sealed using **XChaCha20-Poly1305 AEAD** on the sender's device *before* hitting the network.
+- The relay only forwards opaque binary ciphertexts (`[chunk_index][ciphertext]`).
+- The relay never receives the shared passphrase, does not possess the encryption keys, and cannot decrypt payload data.
+- If a malicious relay attempts to alter even a single byte of ciphertext in transit, the receiver's Poly1305 authentication tag verification fails immediately and the chunk is dropped.
+
+---
+
+### Q: What happens if a network glitch corrupts bytes mid-transfer?
+In legacy protocols (`scp`, standard FTP), corruption during a multi-gigabyte transfer either fails silently (corrupting data on disk) or crashes the entire connection at the end, forcing a restart from 0%.
+In SmartXfer:
+- Each 1 MiB chunk is verified with **BLAKE3** immediately upon receipt.
+- If a chunk fails cryptographic verification or AEAD authentication, it is rejected before ever touching the disk.
+- Only pristine, verified chunks are saved. Corrupted chunks are requested again on the next pass without affecting valid chunks already stored.
+
+---
+
+### Q: Does SmartXfer require an internet connection or cloud account?
+**No.** SmartXfer was built specifically for air-gapped facilities, disaster response, and field telemetry:
+- It requires no cloud servers, no AWS/S3 credentials, no accounts, and no DNS.
+- Two laptops plugged directly into each other with an Ethernet cable or connected to an ad-hoc battery-powered Wi-Fi hotspot can transfer files immediately.
+
+---
+
+### Q: How does SmartXfer compare to other tools?
+
+| Feature | `scp` / `sftp` | `rsync` | Magic Wormhole | Syncthing | **SmartXfer** |
+|---|---|---|---|---|---|
+| **Resumption on Crash** | No (restarts byte 0) | Complex `--partial` flags | No (session-tied) | Yes (sync engine) | **Automatic by Default** |
+| **Encrypted Wire** | Yes (SSH) | Optional (`-e ssh`) | Yes (PAKE) | Yes (TLS) | **Yes (XChaCha20 AEAD)** |
+| **Untrusted Relay Support** | No (direct only) | No | Yes (Mailbox server) | Yes (Relays) | **Yes (Zero-Knowledge Relay)** |
+| **Fully Offline LAN / Hotspot** | Yes | Yes | Requires rendezvous | Complex discovery | **Yes (Direct Zero-Conf TCP)** |
+| **Chunk-Level Integrity** | No (stream-level) | Block rolling checksum | Single whole-file | Chunk hashing | **BLAKE3 Per 1 MiB Chunk** |
+| **Router UPnP Auto-Mapping** | No | No | No | Yes | **Yes (`--upnp`)** |
+| **Binary Footprint** | External runtime / OpenSSH | External rsync binary | Python / pip runtime | Background daemon | **Single Self-Contained Binary** |
+
+---
+
+### Q: What operating systems and hardware are supported?
+SmartXfer compiles to a single, standalone native binary without external runtime dependencies (no libc dynamic linking issues, no Python, no OpenSSL):
+- **Windows**: Windows 10, Windows 11, Windows Server (x86_64, ARM64).
+- **Linux**: Ubuntu, Debian, Fedora, Alpine, Arch, RHEL (x86_64, aarch64, armv7).
+- **macOS**: Apple Silicon (M1/M2/M3/M4) and Intel Macs.
+- **Embedded / IoT**: Raspberry Pi, BeagleBone, and industrial edge gateways.
+
+---
+
+### Q: How can I script SmartXfer in automated pipelines?
+All commands are non-interactive when flags are supplied. Standard process exit codes:
+- `0`: Transfer completed and 100% verified.
+- `1`: Network or cryptographic error (safe to automatically retry in a bash/PowerShell loop until successful).
+
+Example PowerShell retry loop:
+```powershell
+do {
+    smartxfer send --file C:\backups\db.tar.gz --to 192.168.1.50:9099 --passphrase $env:SECRET
+    if ($LASTEXITCODE -ne 0) { Start-Sleep -Seconds 5 }
+} while ($LASTEXITCODE -ne 0)
+```
