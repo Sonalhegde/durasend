@@ -255,7 +255,24 @@ fn handle_connection(
         manifest.file_id
     );
 
-    // 2. Identify temp directory for this transfer
+    // 2. Check if the final file is already fully assembled and valid
+    let final_dest = out_dir.join(&manifest.file_name);
+    if final_dest.exists() {
+        if let Ok(meta) = fs::metadata(&final_dest) {
+            if meta.len() == manifest.file_size {
+                println!(
+                    "[durasend] Target file '{}' already exists and matches expected size ({} bytes).",
+                    manifest.file_name, manifest.file_size
+                );
+                let missing_indices: Vec<u32> = Vec::new();
+                let missing_bytes = serde_json::to_vec(&missing_indices)?;
+                protocol::write_frame(stream, &missing_bytes)?;
+                return Ok(());
+            }
+        }
+    }
+
+    // 3. Identify temp directory for this transfer
     let temp_dir = out_dir.join(format!(".durasend_{}", manifest.file_id));
     fs::create_dir_all(&temp_dir)?;
 
@@ -265,7 +282,7 @@ fn handle_connection(
         fs::write(&manifest_file_path, &manifest_bytes)?;
     }
 
-    // 3. Scan temp dir for existing valid chunks
+    // 4. Scan temp dir for existing valid chunks
     let mut missing_indices = Vec::new();
     let total_chunks = manifest.chunk_hashes.len();
 
@@ -298,7 +315,7 @@ fn handle_connection(
         missing_indices.len()
     );
 
-    // 4. Send missing chunk list
+    // 5. Send missing chunk list
     let missing_bytes = serde_json::to_vec(&missing_indices)?;
     protocol::write_frame(stream, &missing_bytes)
         .context("Failed to send missing chunk indices to sender")?;
@@ -309,7 +326,7 @@ fn handle_connection(
         return Ok(());
     }
 
-    // 5. Receive missing chunk frames
+    // 6. Receive missing chunk frames
     let mut chunks_remaining = missing_indices.len();
     while chunks_remaining > 0 {
         let frame_payload = match protocol::read_frame(stream) {
@@ -374,7 +391,7 @@ fn handle_connection(
         );
     }
 
-    // 6. When all chunks are stored, assemble the final file
+    // 7. When all chunks are stored, assemble the final file
     assemble_file(out_dir, &temp_dir, &manifest)?;
 
     Ok(())
