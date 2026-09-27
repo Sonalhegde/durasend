@@ -1,19 +1,20 @@
-use crate::crypto;
-use crate::manifest;
-use crate::protocol;
-
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use manifest::Manifest;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 
+use crate::crypto;
+use crate::manifest::{self, Manifest};
+use crate::protocol;
+use crate::relay;
+use crate::upnp;
+
 #[derive(Parser)]
 #[command(
-    name = "durasend",
-    about = "Resilient, secure file transfer for unstable networks",
+    name = "smartxfer",
+    about = "Resilient, encrypted file transfer for unstable and remote networks",
     version = "0.1.0"
 )]
 struct Cli {
@@ -23,14 +24,18 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Send a file to a remote receiver
+    /// Send a file to a receiver (direct connection or via relay)
     Send {
         /// Path to the file to transfer
         file: PathBuf,
 
-        /// Receiver address (host:port)
-        #[arg(long)]
-        to: String,
+        /// Direct receiver address (host:port)
+        #[arg(long, conflicts_with = "relay")]
+        to: Option<String>,
+
+        /// Relay server address for NAT/firewall traversal (host:port)
+        #[arg(long, conflicts_with = "to")]
+        relay: Option<String>,
 
         /// Shared secret passphrase for AEAD encryption
         #[arg(long)]
@@ -45,11 +50,19 @@ enum Commands {
         simulate_flaky: bool,
     },
 
-    /// Run as a persistent receiver listener
+    /// Run as a receiver (listening locally or connecting via relay)
     Receive {
-        /// Bind address (host:port)
-        #[arg(long)]
-        listen: String,
+        /// Bind address for direct connections (host:port)
+        #[arg(long, conflicts_with = "relay")]
+        listen: Option<String>,
+
+        /// Relay server address for NAT/firewall traversal (host:port)
+        #[arg(long, conflicts_with = "listen")]
+        relay: Option<String>,
+
+        /// Enable UPnP automatic router port mapping and external IP discovery
+        #[arg(long, default_value_t = false)]
+        upnp: bool,
 
         /// Directory where completed files and resume state live
         #[arg(long)]
@@ -59,30 +72,42 @@ enum Commands {
         #[arg(long)]
         passphrase: String,
     },
+
+    /// Run a lightweight, zero-knowledge TCP bridging relay
+    Relay {
+        /// Bind address for the relay (host:port)
+        #[arg(long, default_value = "0.0.0.0:9099")]
+        listen: String,
+    },
 }
 
-pub fn run_cli(_app_name: &str) -> Result<()> {
+pub fn run_cli(app_name: &str) -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
         Commands::Send {
             file,
             to,
+            relay,
             passphrase,
             chunk_size,
             simulate_flaky,
-        } => run_send(&file, &to, &passphrase, chunk_size, simulate_flaky),
+        } => run_send(&file, to.as_deref(), relay.as_deref(), &passphrase, chunk_size, simulate_flaky),
         Commands::Receive {
             listen,
+            relay,
+            upnp,
             out_dir,
             passphrase,
-        } => run_receive(&listen, &out_dir, &passphrase),
+        } => run_receive(app_name, listen.as_deref(), relay.as_deref(), upnp, &out_dir, &passphrase),
+        Commands::Relay { listen } => relay::run_relay(&listen),
     }
 }
 
 fn run_send(
     file_path: &Path,
-    to: &str,
+    to: Option<&str>,
+    relay_addr: Option<&str>,
     passphrase: &str,
     chunk_size: u32,
     simulate_flaky: bool,
@@ -91,11 +116,15 @@ fn run_send(
         bail!("Source file does not exist: {:?}", file_path);
     }
 
-    println!("[durasend] Preparing manifest for {:?}...", file_path);
+    if to.is_none() && relay_addr.is_none() {
+        bail!("You must specify either --to <ADDR> (direct) or --relay <ADDR> (remote relay)");
+    }
+
+    println!("[smartxfer] Preparing manifest for {:?}...", file_path);
     let manifest = manifest::create_manifest(file_path, chunk_size)
         .context("Failed to generate transfer manifest")?;
     println!(
-        "[durasend] Manifest ready: file='{}', size={} bytes, chunks={}, file_id={}",
+        "[smartxfer] Manifest ready: file='{}', size={} bytes, chunks={}, file_id={}",
         manifest.file_name,
         manifest.file_size,
         manifest.chunk_hashes.len(),
@@ -104,10 +133,20 @@ fn run_send(
 
     let key = crypto::derive_key(passphrase)?;
 
-    println!("[durasend] Connecting to receiver at {}...", to);
-    let mut stream = TcpStream::connect(to)
-        .with_context(|| format!("Failed to connect to receiver at {}", to))?;
-    println!("[durasend] Connected to receiver.");
+    let mut stream = if let Some(relay) = relay_addr {
+        println!("[smartxfer] Connecting to relay at {}...", relay);
+        let s = relay::connect_via_relay(relay, relay::ROLE_SENDER, passphrase)
+            .context("Failed to connect and pair with receiver on relay")?;
+        println!("[smartxfer] Paired with receiver via relay!");
+        s
+    } else {
+        let dest = to.unwrap();
+        println!("[smartxfer] Connecting to receiver at {}...", dest);
+        let s = TcpStream::connect(dest)
+            .with_context(|| format!("Failed to connect to receiver at {}", dest))?;
+        println!("[smartxfer] Connected directly to receiver.");
+        s
+    };
 
     // Send manifest frame
     let manifest_bytes = serde_json::to_vec(&manifest)?;
@@ -121,12 +160,12 @@ fn run_send(
         .context("Failed to parse missing chunk list JSON")?;
 
     if missing_indices.is_empty() {
-        println!("[durasend] Nothing to send -- receiver already has all chunks. Transfer complete.");
+        println!("[smartxfer] Nothing to send -- receiver already has all chunks. Transfer complete.");
         return Ok(());
     }
 
     println!(
-        "[durasend] Receiver requested {} missing chunk(s) out of {} total.",
+        "[smartxfer] Receiver requested {} missing chunk(s) out of {} total.",
         missing_indices.len(),
         manifest.chunk_hashes.len()
     );
@@ -134,7 +173,7 @@ fn run_send(
     let flaky_threshold = if simulate_flaky {
         let threshold = (missing_indices.len() / 3).max(1);
         println!(
-            "[durasend] --simulate-flaky enabled: will drop connection after sending {} chunk(s)",
+            "[smartxfer] --simulate-flaky enabled: will drop connection after sending {} chunk(s)",
             threshold
         );
         Some(threshold)
@@ -150,7 +189,7 @@ fn run_send(
         if let Some(limit) = flaky_threshold {
             if sent_count >= limit {
                 println!(
-                    "[durasend] [FLAKY SIMULATION] Intentionally killing connection after sending {} chunk(s).",
+                    "[smartxfer] [FLAKY SIMULATION] Intentionally killing connection after sending {} chunk(s).",
                     sent_count
                 );
                 let _ = stream.shutdown(std::net::Shutdown::Both);
@@ -193,7 +232,7 @@ fn run_send(
 
         sent_count += 1;
         println!(
-            "[durasend] Sent chunk {}/{} (index: {}, raw: {} bytes, compressed+encrypted: {} bytes)",
+            "[smartxfer] Sent chunk {}/{} (index: {}, raw: {} bytes, compressed+encrypted: {} bytes)",
             sent_count,
             missing_indices.len(),
             chunk_idx,
@@ -202,34 +241,83 @@ fn run_send(
         );
     }
 
-    println!("[durasend] All requested chunks sent successfully!");
+    println!("[smartxfer] All requested chunks sent successfully!");
     Ok(())
 }
 
-fn run_receive(listen: &str, out_dir: &Path, passphrase: &str) -> Result<()> {
+fn run_receive(
+    app_name: &str,
+    listen: Option<&str>,
+    relay_addr: Option<&str>,
+    enable_upnp: bool,
+    out_dir: &Path,
+    passphrase: &str,
+) -> Result<()> {
     fs::create_dir_all(out_dir)
         .with_context(|| format!("Failed to create output directory {:?}", out_dir))?;
 
-    let listener = TcpListener::bind(listen)
-        .with_context(|| format!("Failed to bind receiver to {}", listen))?;
-    println!("[durasend] Receiver listening on {} (out_dir: {:?})", listen, out_dir);
+    if listen.is_none() && relay_addr.is_none() {
+        bail!("You must specify either --listen <ADDR> (direct) or --relay <ADDR> (remote relay)");
+    }
 
     let key = crypto::derive_key(passphrase)?;
+
+    if let Some(relay) = relay_addr {
+        println!("[smartxfer] Connecting to relay at {} (waiting for sender)...", relay);
+        let mut stream = relay::connect_via_relay(relay, relay::ROLE_RECEIVER, passphrase)
+            .context("Failed to connect and register on relay")?;
+        println!("[smartxfer] Sender connected via relay! Receiving transfer...");
+
+        handle_connection(&mut stream, out_dir, &key)?;
+        println!("[smartxfer] Session complete.");
+        return Ok(());
+    }
+
+    let listen_addr = listen.unwrap();
+
+    // Handle UPnP if requested
+    let _upnp_guard = if enable_upnp {
+        let port = parse_port(listen_addr).unwrap_or(9099);
+        println!("[upnp] Discovering local gateway router for port {}...", port);
+        match upnp::UpnpMapping::try_map_port(port) {
+            Ok(mapping) => {
+                println!("[upnp] Router port {} successfully opened via UPnP!", port);
+                if let Some(ext_ip) = &mapping.external_ip {
+                    println!("[upnp] Public IP Address: {}", ext_ip);
+                    println!(
+                        "[upnp] Remote senders can transfer via: {} send <FILE> --to {}:{} --passphrase \"...\"",
+                        app_name, ext_ip, port
+                    );
+                }
+                Some(mapping)
+            }
+            Err(e) => {
+                println!("[upnp] Note: UPnP router mapping unavailable ({}). Standard LAN listener active.", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let listener = TcpListener::bind(listen_addr)
+        .with_context(|| format!("Failed to bind receiver to {}", listen_addr))?;
+    println!("[smartxfer] Receiver listening on {} (out_dir: {:?})", listen_addr, out_dir);
 
     for stream_res in listener.incoming() {
         let mut stream = match stream_res {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("[durasend] Connection accept error: {:?}", e);
+                eprintln!("[smartxfer] Connection accept error: {:?}", e);
                 continue;
             }
         };
 
         let peer_addr = stream.peer_addr().ok();
-        println!("[durasend] Accepted connection from {:?}", peer_addr);
+        println!("[smartxfer] Accepted connection from {:?}", peer_addr);
 
         if let Err(e) = handle_connection(&mut stream, out_dir, &key) {
-            eprintln!("[durasend] Transfer session error: {:?}", e);
+            eprintln!("[smartxfer] Transfer session error: {:?}", e);
         }
     }
 
@@ -248,7 +336,7 @@ fn handle_connection(
         .context("Failed to parse manifest JSON")?;
 
     println!(
-        "[durasend] Received manifest: '{}' ({} bytes, {} chunks, file_id: {})",
+        "[smartxfer] Received manifest: '{}' ({} bytes, {} chunks, file_id: {})",
         manifest.file_name,
         manifest.file_size,
         manifest.chunk_hashes.len(),
@@ -261,7 +349,7 @@ fn handle_connection(
         if let Ok(meta) = fs::metadata(&final_dest) {
             if meta.len() == manifest.file_size {
                 println!(
-                    "[durasend] Target file '{}' already exists and matches expected size ({} bytes).",
+                    "[smartxfer] Target file '{}' already exists and matches expected size ({} bytes).",
                     manifest.file_name, manifest.file_size
                 );
                 let missing_indices: Vec<u32> = Vec::new();
@@ -309,7 +397,7 @@ fn handle_connection(
 
     let already_have = total_chunks - missing_indices.len();
     println!(
-        "[durasend] Resume check: {}/{} chunks already present and verified. Requesting {} missing chunks.",
+        "[smartxfer] Resume check: {}/{} chunks already present and verified. Requesting {} missing chunks.",
         already_have,
         total_chunks,
         missing_indices.len()
@@ -321,7 +409,7 @@ fn handle_connection(
         .context("Failed to send missing chunk indices to sender")?;
 
     if missing_indices.is_empty() {
-        println!("[durasend] All chunks already verified. Ensuring final file is assembled.");
+        println!("[smartxfer] All chunks already verified. Ensuring final file is assembled.");
         assemble_file(out_dir, &temp_dir, &manifest)?;
         return Ok(());
     }
@@ -333,7 +421,7 @@ fn handle_connection(
             Ok(p) => p,
             Err(e) => {
                 println!(
-                    "[durasend] Transfer interrupted ({} chunks pending): {}",
+                    "[smartxfer] Transfer interrupted ({} chunks pending): {}",
                     chunks_remaining, e
                 );
                 return Ok(());
@@ -384,7 +472,7 @@ fn handle_connection(
 
         chunks_remaining -= 1;
         println!(
-            "[durasend] Verified and stored chunk {} ({} bytes plaintext). Chunks remaining: {}",
+            "[smartxfer] Verified and stored chunk {} ({} bytes plaintext). Chunks remaining: {}",
             index,
             plaintext.len(),
             chunks_remaining
@@ -409,7 +497,7 @@ fn assemble_file(out_dir: &Path, temp_dir: &Path, manifest: &Manifest) -> Result
         }
     }
 
-    println!("[durasend] Assembling complete file into {:?}...", final_dest);
+    println!("[smartxfer] Assembling complete file into {:?}...", final_dest);
     {
         let mut final_file = OpenOptions::new()
             .create(true)
@@ -445,9 +533,16 @@ fn assemble_file(out_dir: &Path, temp_dir: &Path, manifest: &Manifest) -> Result
     let _ = fs::remove_dir_all(temp_dir);
 
     println!(
-        "[durasend] SUCCESS! File '{}' assembled successfully at {:?}",
+        "[smartxfer] SUCCESS! File '{}' assembled successfully at {:?}",
         manifest.file_name, final_dest
     );
     Ok(())
 }
 
+fn parse_port(addr: &str) -> Option<u16> {
+    if let Some(colon) = addr.rfind(':') {
+        addr[colon + 1..].parse().ok()
+    } else {
+        addr.parse().ok()
+    }
+}

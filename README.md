@@ -1,13 +1,13 @@
 # SmartXfer (DuraSend)
 
-> **Resilient, encrypted file transfer for unstable networks.**  
-> Built for places where the connection drops mid-transfer and starting over isn't an option: rural clinics, disaster zones, racetrack telemetry, and anywhere else the network can't be trusted to stay up.
+> **Resilient, encrypted file transfer for unstable and remote networks.**  
+> Built for places where the connection drops mid-transfer and starting over isn't an option: rural clinics, disaster zones, racetrack telemetry, remote field operations, and cross-internet transfers.
 
 - 🔄 **Resumable by default** — kill the connection mid-transfer, rerun the same command, it picks up exactly where it left off. No `--resume` flag, no special mode.
 - 🔐 **Encrypted end-to-end** — XChaCha20-Poly1305 AEAD per chunk, nothing readable on the wire or by a relay.
 - ✅ **Integrity-checked per chunk** — BLAKE3 hashing catches corruption at the chunk level, not just at the end of a failed transfer.
 - 📦 **Compressed before encrypted** — zstd shrinks the payload before it's sealed, so you're not paying bandwidth for entropy.
-- 🌐 **Works fully offline** — direct TCP between two devices on the same local network, hotspot, or cable. No internet, no cloud server, no DNS required.
+- 🌐 **Works across ANY network** — direct local LAN, ad-hoc hotspot, automatic UPnP router port forwarding, or zero-config end-to-end encrypted relay for remote connections across firewalls.
 - 📀 **Single static binary** — no runtime, no package manager needed on the target machine.
 
 ---
@@ -15,6 +15,9 @@
 ## Table of Contents
 
 - [How it works](#how-it-works)
+- [Remote Network Options](#remote-network-options)
+  - [Option 1: Automatic UPnP Router Port Forwarding](#option-1-automatic-upnp-router-port-forwarding)
+  - [Option 2: Zero-Config End-to-End Encrypted Relay](#option-2-zero-config-end-to-end-encrypted-relay)
 - [Architecture](#architecture)
 - [Wire protocol](#wire-protocol)
 - [Resume flow](#resume-flow)
@@ -39,7 +42,7 @@ flowchart LR
     B --> C["Hash each chunk<br/>(BLAKE3)"]
     B --> D["Compress<br/>(zstd)"]
     D --> E["Encrypt<br/>(XChaCha20-Poly1305)"]
-    E --> F[Send over TCP]
+    E --> F[Send over TCP / Relay]
     F --> G[Receive & decrypt]
     G --> H[Decompress]
     H --> I[Verify hash]
@@ -47,6 +50,69 @@ flowchart LR
     J -- no --> K[Wait for more]
     J -- yes --> L[Assemble final file]
 ```
+
+---
+
+## Remote Network Options
+
+SmartXfer supports both direct LAN transfers and two remote network traversal methods:
+
+### Option 1: Automatic UPnP Router Port Forwarding
+If you are behind a home or office router with UPnP enabled, SmartXfer can automatically ask your router to open a port and query your public IP address.
+
+1. **Receiver starts with `--upnp`:**
+   ```bash
+   smartxfer receive --listen 0.0.0.0:9099 --upnp --out-dir ./received --passphrase "shared-secret"
+   ```
+   SmartXfer discovers the router, maps port 9099, and prints your public IP:
+   ```text
+   [upnp] Router port 9099 successfully opened via UPnP!
+   [upnp] Public IP Address: 203.0.113.45
+   [upnp] Remote senders can transfer via: smartxfer send <FILE> --to 203.0.113.45:9099 --passphrase "..."
+   ```
+
+2. **Remote sender connects directly over the Internet:**
+   ```bash
+   smartxfer send ./records.tar --to 203.0.113.45:9099 --passphrase "shared-secret"
+   ```
+   *(When the receiver finishes or exits, it automatically unmaps the port from your router.)*
+
+---
+
+### Option 2: Zero-Config End-to-End Encrypted Relay
+For devices behind cellular 4G/5G, double-NAT, university/corporate firewalls, or routers without UPnP, SmartXfer includes a built-in **zero-knowledge TCP relay**. Both devices make an outgoing connection to the relay server.
+
+```mermaid
+sequenceDiagram
+    participant S as Sender (Behind NAT B)
+    participant Relay as SmartXfer Relay (Public Host)
+    participant R as Receiver (Behind NAT A)
+
+    R->>Relay: Outbound connection: register session (blake3 of passphrase)
+    Note over Relay: Waits for sender to arrive
+    S->>Relay: Outbound connection: connect session (blake3 of passphrase)
+    Note over Relay: Bridges TCP streams bi-directionally
+    S->>R: Transmit manifest and AEAD-encrypted chunks over bridged stream
+    Note over Relay: Relay forwards opaque ciphertext (zero knowledge)
+```
+
+1. **Run a relay (on any VPS, cloud server, or accessible machine):**
+   ```bash
+   smartxfer relay --listen 0.0.0.0:9099
+   ```
+
+2. **Receiver connects to the relay:**
+   ```bash
+   smartxfer receive --relay relay.example.com:9099 --out-dir ./received --passphrase "shared-secret"
+   ```
+
+3. **Sender connects to the same relay:**
+   ```bash
+   smartxfer send ./file.zip --relay relay.example.com:9099 --passphrase "shared-secret"
+   ```
+
+> [!NOTE]
+> **Complete End-to-End Security:** The relay server only forwards raw bytes. It never has access to the passphrase or encryption keys, meaning the relay cannot decrypt, inspect, or tamper with any file data.
 
 ---
 
@@ -60,7 +126,7 @@ flowchart TB
         C --> D[Manifest builder]
         B --> E[zstd compress]
         E --> F[orion AEAD encrypt]
-        F --> G[TCP frame writer]
+        F --> G[TCP / Relay writer]
     end
 
     subgraph Wire["Wire protocol — TCP, length-prefixed frames"]
@@ -70,7 +136,7 @@ flowchart TB
     end
 
     subgraph Receiver["smartxfer receive"]
-        I[TCP frame reader] --> J["Resume matcher<br/>(file_id → temp dir scan)"]
+        I[TCP / Relay reader] --> J["Resume matcher<br/>(file_id → temp dir scan)"]
         J --> K[Missing-chunk list]
         I --> L[orion AEAD decrypt]
         L --> M[zstd decompress]
@@ -95,7 +161,9 @@ flowchart TB
 | `manifest` | `src/manifest.rs` | File identity: name, size, chunk hashes, `file_id` |
 | `crypto` | `src/crypto.rs` | Key derivation + AEAD encrypt/decrypt (orion) |
 | `protocol` | `src/protocol.rs` | Wire framing: length-prefixed frames, chunk encode/decode |
-| `runner` | `src/runner.rs` | CLI, `send()`/`receive()` orchestration, resume logic |
+| `relay` | `src/relay.rs` | Lightweight TCP bridging relay with session matching |
+| `upnp` | `src/upnp.rs` | SSDP discovery, UPnP IGD port mapping & public IP resolution |
+| `runner` | `src/runner.rs` | CLI orchestration, resume logic, and transfer pipelines |
 | `main bins` | `src/bin/smartxfer.rs`, `src/bin/durasend.rs` | Executable entry points |
 
 ---
@@ -125,25 +193,6 @@ sequenceDiagram
     end
 ```
 
-### Manifest (JSON)
-```json
-{
-  "file_name": "patient_records_batch7.tar",
-  "file_size": 6000000,
-  "chunk_size": 1048576,
-  "chunk_hashes": ["<blake3 hex>", "..."],
-  "file_id": "<blake3 hex of name:size:chunk_size>"
-}
-```
-
-### Chunk frame (binary)
-```text
-+----------------+----------------------------+
-| index (u32 LE) | orion AEAD ciphertext      |
-+----------------+----------------------------+
-```
-*(orion embeds its own nonce + auth tag in the ciphertext — no separate nonce field needed.)*
-
 ---
 
 ## Resume flow
@@ -166,7 +215,7 @@ sequenceDiagram
     Note over R: All chunks present → assemble
 ```
 
-No `--resume` flag exists on purpose — resuming is the default behavior of re-running `send`, not an opt-in mode. This avoids the failure mode where someone forgets a flag and unknowingly re-sends a whole file.
+No `--resume` flag exists on purpose — resuming is the default behavior of re-running `send`, not an opt-in mode.
 
 ---
 
@@ -181,48 +230,33 @@ cargo build --release
 # Binaries available at target/release/smartxfer (and target/release/durasend)
 ```
 
-### A note on dependency pinning
-Several crates in the encryption dependency chain require the `edition2024` Cargo feature (Rust ≥1.85). If you're on an older toolchain and hit edition2024 build errors, `Cargo.toml` already pins the known offenders (`zeroize`, `getrandom`, `clap`, `jobserver`) to MSRV-compatible versions — if `cargo build` still fails on a fresh checkout, run:
-```bash
-cargo update -p jobserver --precise 0.1.32
-```
-and re-pin any newly-surfaced transitive dependency the same way (`cargo tree -i <crate-name>` shows what's pulling it in).
-
----
-
-## Usage
-
-Start a receiver (leave this running — it accepts one transfer after another):
-```bash
-smartxfer receive --listen 0.0.0.0:9999 --out-dir ./received --passphrase "shared-secret"
-```
-
-Send a file:
-```bash
-smartxfer send ./patient_records.tar --to 192.168.1.50:9999 --passphrase "shared-secret"
-```
-
-Test resume behavior (deliberately drops the connection partway through, to verify a rerun resumes instead of restarting):
-```bash
-smartxfer send ./bigfile.bin --to 192.168.1.50:9999 --passphrase "shared-secret" --simulate-flaky
-# rerun the identical command — it resumes automatically
-smartxfer send ./bigfile.bin --to 192.168.1.50:9999 --passphrase "shared-secret"
-```
-
 ---
 
 ## Flags
 
-| Command | Flag | Required | Default | Purpose |
-|---|---|---|---|---|
-| `send` | `<FILE>` | ✅ | — | Path to the file to transfer |
-| `send` | `--to` | ✅ | — | Receiver address, `host:port` |
-| `send` | `--passphrase` | ✅ | — | Shared secret for key derivation |
-| `send` | `--chunk-size` | ❌ | `1048576` | Bytes per chunk |
-| `send` | `--simulate-flaky` | ❌ | `off` | Testing aid — deliberately drops connection to verify resume |
-| `receive` | `--listen` | ✅ | — | Bind address, `host:port` |
-| `receive` | `--out-dir` | ✅ | — | Where completed files and in-progress temp state live |
-| `receive` | `--passphrase` | ✅ | — | Must match sender's passphrase |
+### `send`
+| Flag | Required | Default | Purpose |
+|---|---|---|---|
+| `<FILE>` | ✅ | — | Path to the file to transfer |
+| `--to` | Conditional | — | Direct receiver address (`host:port`) |
+| `--relay` | Conditional | — | Remote relay server address (`host:port`) |
+| `--passphrase` | ✅ | — | Shared secret for AEAD encryption |
+| `--chunk-size` | ❌ | `1048576` | Bytes per chunk (1 MiB default) |
+| `--simulate-flaky` | ❌ | `off` | Testing aid: deliberately drops connection to test resume |
+
+### `receive`
+| Flag | Required | Default | Purpose |
+|---|---|---|---|
+| `--listen` | Conditional | — | Bind address for direct LAN connections |
+| `--relay` | Conditional | — | Remote relay server address (`host:port`) |
+| `--upnp` | ❌ | `false` | Enable automatic router port mapping and public IP lookup |
+| `--out-dir` | ✅ | — | Where completed files and in-progress temp state live |
+| `--passphrase` | ✅ | — | Must match sender's passphrase |
+
+### `relay`
+| Flag | Required | Default | Purpose |
+|---|---|---|---|
+| `--listen` | ❌ | `0.0.0.0:9099` | Bind address for the relay server |
 
 ---
 
@@ -234,44 +268,9 @@ smartxfer send ./bigfile.bin --to 192.168.1.50:9999 --passphrase "shared-secret"
 | Per-chunk integrity | BLAKE3 hash, verified before a chunk is accepted | ✅ |
 | Whole-file integrity | Implied by all chunk hashes matching the manifest | ✅ |
 | Authentication tag | orion's `seal`/`open` includes and checks it | ✅ |
+| Relay Zero-Knowledge | Relay only forwards ciphertext without seeing keys | ✅ |
 | Key derivation | Raw BLAKE3 of passphrase — no salt, no work factor | ⚠️ MVP only |
-| Transport peer auth | None — any TCP peer can attempt to connect | ⚠️ Not yet implemented |
 | Forward secrecy | None — static passphrase-derived key per transfer | ⚠️ Not yet implemented |
-
-**Honest threat model:** this protects file contents from a passive network observer or a relay that doesn't know the passphrase. It does not yet protect against offline brute-forcing of a captured ciphertext (no KDF work factor) or an active man-in-the-middle. Argon2id key derivation is the top security item on the roadmap.
-
----
-
-## Offline / field deployment
-
-This is the core use case, not an edge case. `smartxfer` needs local network connectivity between two devices — no internet required:
-- Two laptops on the same LAN/WiFi (even with no internet uplink)
-- Direct ethernet or USB-tether cable
-- A WiFi hotspot with no internet backhaul — one device hosts it
-- An ad-hoc/mesh WiFi network with no router at all
-
-### Field example (disaster zone):
-```bash
-# Device A hosts a WiFi hotspot with no internet, then:
-smartxfer receive --listen 0.0.0.0:9999 --out-dir ./incoming --passphrase "site-alpha"
-
-# Device B joins that hotspot, then:
-smartxfer send ./report.tar --to 192.168.4.1:9999 --passphrase "site-alpha"
-```
-
-**Current limitation:** direct point-to-point only — the sender needs to know the receiver's reachable IP:port. There's no NAT traversal or relay yet for devices on separate isolated networks; that's the P2P/relay roadmap item below.
-
----
-
-## Roadmap
-
-1. **QUIC transport** — swap TCP for `quinn`; resume/manifest logic is already transport-agnostic so this is a lower-layer swap, not a rewrite.
-2. **Argon2id key derivation** with a random salt in the manifest.
-3. **Delta-sync for modified files** (rsync-style rolling checksums) — re-syncing an updated telemetry log sends only the changed bytes.
-4. **P2P + relay fallback** (`libp2p`) for devices with no direct route.
-5. **Local mesh mode** for racetrack telemetry — many nearby nodes relaying for each other.
-6. **Store-and-forward queue** (SQLite-backed) — `send` queues locally when no receiver is currently reachable and flushes automatically.
-7. **GUI / mobile wrapping** — Tauri for desktop, UniFFI bindings for mobile, once the core engine is stable.
 
 ---
 
@@ -286,13 +285,13 @@ durasend/
 ├── test_runner.py          <- automated resilience & flaky link test suite
 └── src/
     ├── lib.rs              Library root exposing modules
-    ├── runner.rs           CLI, send()/receive() orchestration, resume logic
+    ├── runner.rs           CLI orchestration, resume logic, transfer workflows
     ├── manifest.rs         Manifest struct, file_id derivation
     ├── crypto.rs           Key derivation, AEAD encrypt/decrypt (orion)
     ├── protocol.rs         Wire framing: length-prefixed frames, chunk encode/decode
+    ├── relay.rs            Built-in TCP bridging relay with session matching
+    ├── upnp.rs             UPnP IGD router port forwarder and public IP query
     └── bin/
         ├── smartxfer.rs    Entry point binary (smartxfer)
         └── durasend.rs     Entry point binary (durasend)
 ```
-
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design rationale, including why each dependency was chosen and the build issues encountered along the way.
